@@ -47,7 +47,7 @@
 //   * Outputs: <id>_deghosted and, optionally, <id>_ghost (removed signal).
 //     The source image is not modified.
 //
-// Version 0.1.2
+// Version 0.1.3
 // ****************************************************************************
 
 #feature-id    Utilities > GhostBuster
@@ -62,7 +62,7 @@
 #include <pjsr/SampleType.jsh>
 
 #define TITLE   "GhostBuster"
-#define VERSION "0.1.2"
+#define VERSION "0.1.3"
 // PixInsight version as a string (the predefined macros expand to bare numbers)
 #ifdef __PI_MAJOR__
 #define GB_PI_VERSION (__PI_MAJOR__ + "." + __PI_MINOR__ + "." + __PI_RELEASE__)
@@ -1370,6 +1370,10 @@ function GB_Dialog(win, params, chans) {
    this.cancelButton.text = "Cancel";
    this.cancelButton.onClick = function () { self.cancel(); };
 
+   this.creditLabel = new Label(this);
+   this.creditLabel.text = "by @bortlebuster on Instagram";
+   this.creditLabel.styleSheet = "QLabel { color: #808080; }";
+
    this.buttons = new HorizontalSizer;
    this.buttons.spacing = 6;
    this.buttons.add(this.reanalyseButton);
@@ -1387,6 +1391,7 @@ function GB_Dialog(win, params, chans) {
    this.right.add(this.manualCheck);
    this.right.add(this.paramBox);
    this.right.addStretch();
+   this.right.add(this.creditLabel);
    this.right.add(this.buttons);
 
    this.sizer = new HorizontalSizer;

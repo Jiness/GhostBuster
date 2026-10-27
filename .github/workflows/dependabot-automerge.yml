@@ -1,5 +1,7 @@
 name: Dependabot auto-merge
 
+# Minor and patch updates proposed by Dependabot are merged once the required checks pass.
+# Major updates stay open for a manual review.
 on: pull_request
 
 permissions:
@@ -14,7 +16,7 @@ jobs:
       pull-requests: write
     steps:
       - id: meta
-        uses: dependabot/fetch-metadata@v3
+        uses: dependabot/fetch-metadata@v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Enable auto-merge for minor and patch updates

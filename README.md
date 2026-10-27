@@ -99,7 +99,8 @@ node tests/ui_test.js
 The tests build synthetic star fields with known ghosts and check detection, ghost removal,
 manual star handling, parameter validation and robustness to invalid input. A second set runs the
 whole script, dialog included, against a minimal simulation of the PixInsight scripting API.
-They do not replace a check inside PixInsight itself.
+GitHub runs them on Linux and on macOS (Apple Silicon) for every change. They do not replace a
+check inside PixInsight itself.
 
 ### Benchmark on real stacks
 

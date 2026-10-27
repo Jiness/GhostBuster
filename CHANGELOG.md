@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3
+
+- Author credit in the dialog.
+- CI: tests also run on macOS with Apple Silicon (M1), Node.js 24 instead of 20 (end of life),
+  GitHub actions at their current major versions.
+- Dependabot: minor and patch updates of the GitHub actions are merged automatically once the
+  required checks pass; major updates stay for manual review.
+
 ## 0.1.2
 
 Diagnostics, after a report of PixInsight appearing frozen on a Mac M1:
