@@ -47,7 +47,7 @@
 //   * Outputs: <id>_deghosted and, optionally, <id>_ghost (removed signal).
 //     The source image is not modified.
 //
-// Version 0.1.1
+// Version 0.1.2
 // ****************************************************************************
 
 #feature-id    Utilities > GhostBuster
@@ -62,7 +62,13 @@
 #include <pjsr/SampleType.jsh>
 
 #define TITLE   "GhostBuster"
-#define VERSION "0.1.1"
+#define VERSION "0.1.2"
+// PixInsight version as a string (the predefined macros expand to bare numbers)
+#ifdef __PI_MAJOR__
+#define GB_PI_VERSION (__PI_MAJOR__ + "." + __PI_MINOR__ + "." + __PI_RELEASE__)
+#else
+#define GB_PI_VERSION "unknown"
+#endif
 
 // ===================== Core (no PixInsight dependencies) =====================
 var GB = {};
@@ -78,6 +84,7 @@ GB.defaults = function () {
       annOut       : 46,    // ghost annulus outer radius (px)
       gateK        : 8.0,   // skip a star if halo-fit residual > gateK x image noise
       nHarm        : 3,     // angular harmonics for the ghost estimate in sparse fields
+      maxStars     : 200,   // candidates kept (largest saturated cores first), bounds the analysis time
       maxLop       : 0.6,   // max lopsidedness of the ghost (fraction of its mean level)
       ratioCap     : 3.0,   // ghost may not exceed ratioCap x the typical ghost/star ratio
       freeBound    : 1.0,   // free correction allowed around the fitted shape (fraction of it)
@@ -261,6 +268,7 @@ GB.validate = function (p) {
    num("annIn", 2, 500);          num("annOut", 6, 1000);
    num("rOut", 16, 2000);         num("gateK", 0.1, 1e3);
    num("nHarm", 1, 6);            num("maxLop", 0, 1);
+   num("maxStars", 1, 5000);
    num("ratioCap", 0.1, 100);     num("freeBound", 0, 10);
    num("colLo", 0.01, 1);         num("colHi", 1, 100);
    num("bgSpread", 0, 1000);
@@ -626,7 +634,14 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
    opts = opts || {};
    var p = GB.scaled(params), nc = chans.length, N = W * H;
    log = log || function () {};
-   var det = GB.detect(chans, W, H, p), stars = det.stars, sat = det.sat;
+   // opts.progress(stage, i, n): called before each star; returning true aborts the run
+   var tick = function (stage, i, n) {
+      if (opts.progress && opts.progress(stage, i, n)) throw new Error("Aborted by the user.");
+   };
+   tick("Detecting saturated stars", 0, 1);
+   var det = GB.detect(chans, W, H, p), stars = det.stars, sat = det.sat, nDet = stars.length;
+   // the largest saturated cores come first: beyond maxStars, the rest is left out
+   if (nDet > p.maxStars) stars = stars.slice(0, p.maxStars);
    if (opts.extra) {
       for (var ei = 0; ei < opts.extra.length; ++ei) {
          var ex0 = opts.extra[ei];
@@ -660,12 +675,13 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
                thStep: p.thStepDeg * Math.PI / 180, nth: Math.round(360 / p.thStepDeg),
                nr: Math.floor((p.annOut - p.annIn) / p.rStep + 1e-6) + 1 };
    var nth = ctx.nth, nr = ctx.nr, thStep = ctx.thStep;
-   log("Detected " + stars.length + " saturated stars.");
+   log("Detected " + nDet + " saturated stars" + (nDet > p.maxStars ? "; the " + p.maxStars + " largest are kept." : "."));
 
    // ---- pass 1: learn the ghost radial shape on clean (dark-sky) stars ----
    var profs = [];
    for (var si = 0; si < stars.length && profs.length < 25; ++si) {
       if (stars[si].manual) continue;
+      tick("Learning the ghost shape", si, stars.length);
       var an = GB.analyseStar(ctx, stars[si], chans);
       if (!an.ok || an.gateRatio > 3) continue;
       var pr = GB.azProfile(an.polL, nth, nr), mx = 0, nanCount = 0;
@@ -703,6 +719,7 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
    for (var c = 0; c < nc; ++c) tr.push([]);
    for (var si = 0; si < stars.length && ratios.length < 25; ++si) {
       if (stars[si].manual) continue;
+      tick("Learning the ghost intensity", si, stars.length);
       var an = GB.analyseStar(ctx, stars[si], chans);
       if (!an.ok || an.gateRatio > 3) continue;
       var hL = 0; for (var c = 0; c < nc; ++c) hL += an.starCol[c];
@@ -733,6 +750,7 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
       var s = stars[si];
       if (selectFn && !selectFn(s)) continue;
       var tag = "(" + Math.round(s.x) + ", " + Math.round(s.y) + ")";
+      tick(opts.dryRun ? "Analysing stars" : "Correcting stars", si, stars.length);
       var force = !!(s.manual || (opts.forceFn && opts.forceFn(s)));
       var an = GB.analyseStar(ctx, s, work, force);
       if (!an.ok && opts.dryRun) { s.status = "gate"; s.conf = 0; continue; }
@@ -853,7 +871,7 @@ GB.autoScale = function (kw, W, H) {
       var v = String(kw[i].value).replace(/'/g, "").trim();
       k[String(kw[i].name).trim().toUpperCase()] = v;
    }
-   function num(n) { var x = parseFloat(k[n]); return isFinite(x) ? x : NaN; }
+   function num(n) { if (!k.hasOwnProperty(n)) return NaN; var x = parseFloat(k[n]); return isFinite(x) ? x : NaN; }
    var ps = NaN, src = "";
    var cd11 = num("CD1_1"), cd21 = num("CD2_1"), cd12 = num("CD1_2"), cd22 = num("CD2_2");
    if (isFinite(cd11) && isFinite(cd21) && isFinite(cd12) && isFinite(cd22)) {
@@ -1215,7 +1233,7 @@ function GB_Dialog(win, params, chans) {
       console.writeln("<end><cbr>Analysing stars (nothing is modified yet)...");
       processEvents();
       var t0 = Date.now();
-      var res = GB.process(self.chans, W, H, self.effectiveParams(), null, function () {}, { dryRun: true });
+      var res = GB.process(self.chans, W, H, self.effectiveParams(), null, function () {}, { dryRun: true, progress: GB_progress() });
       var p = self.effectiveParams(), marks = [];
       for (var i = 0; i < res.stars.length; ++i) {
          var s = res.stars[i];
@@ -1281,7 +1299,10 @@ function GB_Dialog(win, params, chans) {
    this.reanalyseButton = new PushButton(this);
    this.reanalyseButton.text = "Re-analyse";
    this.reanalyseButton.toolTip = "<p>Run the star analysis again (needed after changing manual settings). Your clicks are kept.</p>";
-   this.reanalyseButton.onClick = function () { self.analyse(); self.updateCounts(); self.canvas.update(); };
+   this.reanalyseButton.onClick = function () {
+      try { self.analyse(); self.updateCounts(); self.canvas.update(); }
+      catch (e) { GB_reportError(e); }
+   };
 
    var labelWidth = this.font.width("Ghost outer radius (px):M");
    function numeric(label, tip, lo, hi, prec, key) {
@@ -1382,7 +1403,52 @@ function GB_Dialog(win, params, chans) {
 }
 GB_Dialog.prototype = new Dialog;
 
+// Progress callback for GB.process: writes the stage and count at most every 1.5 s, keeps
+// PixInsight responsive and lets the console Abort button stop the run.
+function GB_progress() {
+   var last = "", lastT = 0;
+   return function (stage, i, n) {
+      var now = Date.now();
+      if (stage != last || now - lastT > 1500 || i == n - 1) {
+         console.writeln(format("  %s: %d / %d", stage, i + 1, n));
+         last = stage; lastT = now;
+      }
+      processEvents();
+      try { return !!console.abortRequested; } catch (e) { return false; }
+   };
+}
+
+// Environment summary written at start, to be pasted in bug reports.
+// The platform is inferred from the form of the home directory, which is not written out.
+function GB_environment() {
+   var ver = "unknown", plat = "unknown platform";
+   try { ver = String(typeof GB_PI_VERSION != "undefined" ? GB_PI_VERSION : "unknown"); } catch (e) { /* keep "unknown" */ }
+   try {
+      var home = String(File.homeDirectory);
+      plat = /^[A-Za-z]:/.test(home) ? "Windows" : (home.indexOf("/Users/") == 0 ? "macOS" : "Linux/Unix");
+   } catch (e) { /* keep "unknown platform" */ }
+   return "PixInsight " + ver + ", " + plat;
+}
+
+function GB_reportError(e) {
+   var msg = e && e.message ? e.message : String(e);
+   if (msg == "Aborted by the user.") { console.warningln("<end><cbr>" + TITLE + ": aborted by the user."); return; }
+   console.criticalln("<end><cbr>" + TITLE + " v" + VERSION + " stopped: " + msg +
+                      (e && e.lineNumber ? " (line " + e.lineNumber + ")" : ""));
+   if (e && e.stack) console.writeln(String(e.stack));
+   console.writeln("If this looks like a bug, please open an issue at github.com/Jiness/GhostBuster/issues " +
+                   "and paste the whole console output of this run.");
+}
+
 function main() {
+   console.show();
+   console.abortEnabled = true;
+   try { GB_run(); }
+   catch (e) { GB_reportError(e); }
+   finally { console.abortEnabled = false; }
+}
+
+function GB_run() {
    console.show();
    var win = ImageWindow.activeWindow;
    if (win.isNull) {
@@ -1392,6 +1458,9 @@ function main() {
    var img = win.mainView.image, W = img.width, H = img.height;
    console.writeln("<end><cbr><br><b>" + TITLE + " v" + VERSION + "</b>");
    console.writeln("Target: " + win.mainView.id);
+   console.writeln(GB_environment() + format("; image %d x %d, %d channel(s)", W, H, img.numberOfChannels));
+   var auto0 = GB.autoScale(GB_keywords(win), W, H);
+   console.writeln(format("Pixel scale factor %.2f (from %s).", auto0.scale, auto0.source));
    // peak memory: per pixel and channel, 4 float32 buffers (input copy, working copy, ghost, output)
    // and a half-resolution preview level; per pixel, detection buffers (float32 luminance,
    // two int32 arrays, three byte masks)
@@ -1414,6 +1483,7 @@ function main() {
    var sample = [], step = Math.max(1, Math.floor(W * H / 500000));
    for (var i = 0; i < W * H; i += step) sample.push(chans[0][i]);
    var med = GB.median(sample, sample.length);
+   console.writeln(format("Image median %.4f (linear data is usually below 0.05).", med));
    if (med > 0.25) {
       var mb = new MessageBox("The image median is " + med.toFixed(3) + ". It looks stretched.\n" +
          "This script is designed for LINEAR data. Continue anyway?", TITLE, StdIcon_Warning, StdButton_Yes, StdButton_No);
@@ -1446,7 +1516,7 @@ function main() {
 
    var t0 = Date.now();
    var res = GB.process(chans, W, H, run, selectFn, function (msg) { console.writeln(msg); processEvents(); },
-                         { extra: extra, forceFn: forceFn });
+                         { extra: extra, forceFn: forceFn, progress: GB_progress() });
 
    var nc = chans.length, out = [];
    for (var c = 0; c < nc; ++c) {

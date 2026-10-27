@@ -41,7 +41,9 @@ module.exports = [
       console: "readonly",
       format: "readonly",
       isFinite: "readonly",
-      processEvents: "readonly"
+      processEvents: "readonly",
+      GB_PI_VERSION: "readonly",
+      File: "readonly"
       }
     },
     rules: {

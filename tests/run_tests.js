@@ -248,6 +248,37 @@ console.log("Analysis and manual stars");
    });
 }
 
+console.log("PixInsight preprocessor");
+test("no '//' inside code: the PJSR preprocessor takes it for a comment, even in strings and regexes", () => {
+   const lines = require("fs").readFileSync(require("path").join(__dirname, "..", "GhostBuster.js"), "utf8").split("\n");
+   const bad = [];
+   lines.forEach((l, i) => {
+      const code = l.trim();
+      if (code.startsWith("//") || code.startsWith("#")) return;
+      // only trailing comments are allowed: " // " after the code
+      for (let k = code.indexOf("//"); k >= 0; k = code.indexOf("//", k + 2))
+         if (code[k - 1] !== " " || (k + 2 < code.length && code[k + 2] !== " ")) { bad.push(i + 1); break; }
+   });
+   assert.deepStrictEqual(bad, [], "lines " + bad.join(", "));
+});
+
+console.log("Run time bounds");
+{
+   test("candidates beyond maxStars are left out, the largest kept", () => {
+      const f = makeField({ seed: 6, bright: 6 });
+      const r = GB.process(f.chans, f.W, f.H, Object.assign(GB.defaults(), { maxStars: 3 }), null, quiet, { dryRun: true });
+      assert.strictEqual(r.stars.length, 3);
+      for (let i = 1; i < 3; ++i) assert.ok(r.stars[i - 1].area >= r.stars[i].area);
+   });
+   test("progress is reported and returning true aborts", () => {
+      const f = makeField({ seed: 6, bright: 6 });
+      const seen = [];
+      assert.throws(() => GB.process(f.chans, f.W, f.H, GB.defaults(), null, quiet,
+         { progress: (stage, i, n) => { seen.push(stage); return stage === "Correcting stars"; } }), /Aborted by the user/);
+      assert.ok(seen.indexOf("Detecting saturated stars") >= 0 && seen.indexOf("Correcting stars") >= 0);
+   });
+}
+
 console.log("Robustness");
 const fin = (r) => r.ghost.every(g => { for (let i = 0; i < g.length; ++i) if (!isFinite(g[i])) return false; return true; });
 test("mono image", () => {

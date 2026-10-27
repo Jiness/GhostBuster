@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.2
+
+Diagnostics, after a report of PixInsight appearing frozen on a Mac M1:
+
+- Errors are caught and written to the Process Console (message, line, call stack) with a link
+  to the issue tracker, instead of leaving the script stopped silently.
+- At start, the console shows the PixInsight version and platform, the image size and channels,
+  the pixel scale factor with its source, and the image median: everything needed in a bug report.
+- Progress is written during analysis and correction (stage and star count, at most every
+  1.5 s); PixInsight stays responsive between stars and the console Abort button stops the run.
+- At most 200 candidate stars are analysed (largest saturated cores first, `maxStars`), which
+  bounds the analysis time on images with very many saturated areas.
+- No more "reference to undefined property" warning when the image has no astrometric solution.
+- Processing results are unchanged (checked pixel by pixel on two stacks). 39 tests.
+
 ## 0.1.1
 
 Fixes found on IC 1805 (Heart Nebula):

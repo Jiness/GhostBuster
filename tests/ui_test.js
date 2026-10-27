@@ -13,9 +13,9 @@ const print = (s) => process.stdout.write(s + "\n");
 const g = global;
 
 // ---- minimal PJSR simulation ----
-g.console = { writeln: (m) => logs.push(String(m)), warningln: (m) => logs.push("WARNING " + m), show: () => {} };
+g.console = { writeln: (m) => logs.push(String(m)), warningln: (m) => logs.push("WARNING " + m), criticalln: (m) => logs.push("CRITICAL " + m), show: () => {} };
 g.processEvents = () => {};
-g.format = (fmt, ...a) => { let i = 0; return fmt.replace(/%(\.\d+)?[fd]/g, (m, p) => { const v = a[i++]; return p ? Number(v).toFixed(+p.slice(1)) : String(Math.round(v)); }); };
+g.format = (fmt, ...a) => { let i = 0; return fmt.replace(/%(\.\d+)?([fds])/g, (m, p, t) => { const v = a[i++]; return t === "s" ? String(v) : p ? Number(v).toFixed(+p.slice(1)) : String(Math.round(v)); }); };
 for (const k of ["StdIcon_Error", "StdIcon_Warning", "StdButton_Ok", "StdButton_Yes", "StdButton_No", "ColorSpace_RGB", "SampleType_Real", "UndoFlag_NoSwapFile"]) g[k] = k;
 g.Rect = function (x0, y0, x1, y1) { Object.assign(this, { x0, y0, x1, y1 }); };
 g.Pen = function (c, w) { this.color = c; this.width = w; };
@@ -107,5 +107,8 @@ for (let c = 0; c < 3 && consistent; ++c) for (let i = 0; i < W * H; i += 37) {
 }
 check("deghosted = source - ghost (clipped to [0, 1])", consistent);
 check("script reported completion", logs.some(l => /Done in/.test(l)));
+check("environment and scale written at start", logs.some(l => /^PixInsight .*image \d+ x \d+/.test(l)) && logs.some(l => /^Pixel scale factor/.test(l)));
+check("progress written during the run", logs.some(l => /^  Correcting stars: \d+ \/ \d+/.test(l)));
+check("no error reported", !logs.some(l => /^CRITICAL/.test(l)));
 print("\n" + (failed ? failed + " check(s) failed" : "all checks passed"));
 process.exitCode = failed ? 1 : 0;
