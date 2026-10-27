@@ -26,11 +26,14 @@
 //      background (quadratic surface); the excess in an annulus is the ghost
 //      signal, with neighbouring stars masked. It is fitted with the learned
 //      shape (radius adjusted per star, limited lopsidedness), then refined by
-//      a bounded free correction. Ghost colour = star colour (measured on the
-//      inner wing) x learned colour ratio, with a bounded local adjustment.
-//   4. Confidence = ghost amplitude / residual structure. The freedom of the
-//      model scales with it: weak ghosts in structured nebula stay regular
-//      rings of the predicted colour.
+//      a bounded free correction. A fit above the physical ceiling (ratio
+//      cap) has absorbed nebula and falls back to the typical ghost.
+//   4. Ghost colour: split chosen so that the corrected disk keeps the colour
+//      of the star light around it, within bounds around the predicted colour
+//      (star colour x learned colour ratio).
+//   5. Confidence = ghost amplitude / residual structure. The freedom of the
+//      shape scales with it: weak ghosts in structured nebula stay regular
+//      rings.
 //
 // USAGE
 //   * Linear data only, after background extraction, before deconvolution
@@ -44,7 +47,7 @@
 //   * Outputs: <id>_deghosted and, optionally, <id>_ghost (removed signal).
 //     The source image is not modified.
 //
-// Version 0.1.0
+// Version 0.1.1
 // ****************************************************************************
 
 #feature-id    Utilities > GhostBuster
@@ -59,7 +62,7 @@
 #include <pjsr/SampleType.jsh>
 
 #define TITLE   "GhostBuster"
-#define VERSION "0.1.0"
+#define VERSION "0.1.1"
 
 // ===================== Core (no PixInsight dependencies) =====================
 var GB = {};
@@ -80,8 +83,10 @@ GB.defaults = function () {
       freeBound    : 1.0,   // free correction allowed around the fitted shape (fraction of it)
       colLo        : 0.4,   // local ghost colour may deviate from the predicted one by these factors
       colHi        : 2.5,
-      confLo       : 1.5,   // below: regular ring, predicted colour (weak ghost in nebula)
-      confHi       : 3.0,   // above: full shape/colour freedom (strong clear ghost)
+      bgSpread     : 5.0,   // background variation around the star (x ghost level) above which the
+                            // colour is fitted on the modelled residual instead of the star light
+      confLo       : 1.5,   // below: regular round ring (weak ghost in nebula)
+      confHi       : 3.0,   // above: full shape freedom (strong clear ghost)
       haloPows     : [2, 3, 4],
       iters        : 5,
       clipHi       : 2.5,
@@ -258,6 +263,7 @@ GB.validate = function (p) {
    num("nHarm", 1, 6);            num("maxLop", 0, 1);
    num("ratioCap", 0.1, 100);     num("freeBound", 0, 10);
    num("colLo", 0.01, 1);         num("colHi", 1, 100);
+   num("bgSpread", 0, 1000);
    num("confLo", 0, 100);         num("confHi", 0, 1000);
    num("iters", 1, 20);           num("clipHi", 0.5, 20);
    num("clipLo", 0.5, 20);        num("rStep", 0.1, 5);
@@ -446,10 +452,12 @@ GB.analyseStar = function (ctx, s, work, ignoreGate) {
       var e = (1 - fx) * (1 - fy) * exE[iy * w + ix] + fx * (1 - fy) * exE[iy * w + ix1] + (1 - fx) * fy * exE[iy1 * w + ix] + fx * fy * exE[iy1 * w + ix1];
       if (e > 0.01) bad[k] = 1;
    }
+   // rIn0: just outside the star core (star colour and star-light reference)
+   var rIn0 = Math.max(p.coreMin, p.coreFactor * s.rs) + 1;
    var tap = new Float64Array(n), T = p.edgeTaper, Ti = Math.ceil(T) + 1;
    for (var j = 0; j < h; ++j) for (var i = 0; i < w; ++i) {
       var q = j * w + i;
-      if (!ann[q]) continue;
+      if (r[q] < p.annIn || r[q] > p.annOut) continue;
       var t1 = Math.min(Math.max(Math.min(r[q] - p.annIn, p.annOut - r[q]) / T, 0), 1);
       var dmin = 1e9;
       if (ex[q]) dmin = 0;
@@ -482,7 +490,7 @@ GB.analyseStar = function (ctx, s, work, ignoreGate) {
       for (var k = 0; k < npol; ++k) polL[k] = (c == 0 ? 0 : polL[k]) + pol[k];
    }
    // star colour: inner wing of the star (dominates any nebula there) minus the background of the outer window
-   var rIn0 = Math.max(p.coreMin, p.coreFactor * s.rs) + 1, starCol = [];
+   var starCol = [];
    for (var c = 0; c < nc; ++c) {
       var inner = [], outer = [];
       for (var q = 0; q < n; ++q) {
@@ -492,8 +500,77 @@ GB.analyseStar = function (ctx, s, work, ignoreGate) {
       }
       starCol.push(inner.length > 10 && outer.length > 10 ? GB.median(inner, inner.length) - GB.median(outer, outer.length) : 0);
    }
-   res.pols = pols; res.polL = polL; res.tap = tap; res.starCol = starCol; res.ok = true;
+   res.pols = pols; res.polL = polL; res.tap = tap; res.exE = exE; res.rIn0 = rIn0; res.starCol = starCol; res.ok = true;
    return res;
+};
+
+// Ghost colour split chosen so that the corrected disk keeps the colour of the star light just
+// outside the core (measured above the local background at the edge of the window). A wrong
+// split shows as a coloured ring after correction, or as a hole in a coloured nebula. The
+// luminance of the ghost is unchanged; each channel stays within [lo, hi] x its predicted share.
+GB.continuityColour = function (an, s, work, shape, kc, ctx, lo, hi) {
+   var p = ctx.p, W = ctx.W, nc = ctx.nc, nth = ctx.nth, nr = ctx.nr, thStep = ctx.thStep;
+   var w = an.w, h = an.h, r = an.r, ex = an.exE, tap = an.tap, R = p.rOut, band = 4;
+   var vin = [], vbg = [], sec = [];
+   for (var c = 0; c < nc; ++c) { vin.push([]); vbg.push([]); sec.push([[], [], [], [], [], [], [], []]); }
+   for (var q = 0; q < w * h; ++q) {
+      if (ex[q]) continue;
+      var gi = (an.y0 + Math.floor(q / w)) * W + an.x0 + q % w;
+      if (ctx.sat[gi]) continue;
+      var dst = r[q] >= an.rIn0 && r[q] < an.rIn0 + band ? vin : r[q] >= R - 10 && r[q] <= R ? vbg : null;
+      if (dst) for (var c = 0; c < nc; ++c) dst[c].push(work[c][gi]);
+      if (dst === vbg) {
+         var th8 = Math.atan2(an.y0 + Math.floor(q / w) - s.y, an.x0 + q % w - s.x); if (th8 < 0) th8 += 2 * Math.PI;
+         var k8 = Math.min(Math.floor(th8 / (Math.PI / 4)), 7);
+         for (var c = 0; c < nc; ++c) sec[c][k8].push(work[c][gi]);
+      }
+   }
+   if (vin[0].length < 20 || vbg[0].length < 20) return false;
+   // structured background (nebula gradient across the window): the star-light reference is not
+   // reliable, the caller keeps its own colour estimate
+   var gmean = 0, gcnt = 0;
+   for (var k = 0; k < nth * nr; ++k) if (shape[k] > 0) { gmean += shape[k]; ++gcnt; }
+   gmean = gcnt ? gmean / gcnt : 0;
+   for (var c = 0; c < nc; ++c) {
+      var lo8 = Infinity, hi8 = -Infinity;
+      for (var k8 = 0; k8 < 8; ++k8) {
+         if (sec[c][k8].length < 10) continue;
+         var m8 = GB.median(sec[c][k8], sec[c][k8].length);
+         if (m8 < lo8) lo8 = m8; if (m8 > hi8) hi8 = m8;
+      }
+      if (hi8 - lo8 > p.bgSpread * kc[c] * gmean) return false;
+   }
+   var bg = [], f = [], sf = 0;
+   for (var c = 0; c < nc; ++c) {
+      bg.push(GB.median(vbg[c], vbg[c].length));
+      f.push(GB.median(vin[c], vin[c].length) - bg[c]);
+      if (f[c] < 0) return false;
+      sf += f[c];
+   }
+   if (sf <= 0) return false;
+   for (var c = 0; c < nc; ++c) f[c] /= sf;
+   // least squares on kc: (pixel - background) - kc * ghost = f * (luminance above background - ghost)
+   var num = [], den = 0;
+   for (var c = 0; c < nc; ++c) num.push(0);
+   for (var j = 0; j < h; ++j) for (var i = 0; i < w; ++i) {
+      var q = j * w + i;
+      if (tap[q] < 0.5) continue;
+      var th = Math.atan2(an.y0 + j - s.y, an.x0 + i - s.x); if (th < 0) th += 2 * Math.PI;
+      var ri = Math.max((r[q] - p.annIn) / p.rStep, 0);
+      if (ri > nr - 1) continue;
+      var v = shape[(Math.min(Math.round(th / thStep), nth - 1) % nth) * nr + Math.round(ri)];
+      if (!(v > 0)) continue;
+      var gi = (an.y0 + j) * W + an.x0 + i, DL = 0;
+      for (var c = 0; c < nc; ++c) DL += work[c][gi] - bg[c];
+      for (var c = 0; c < nc; ++c) num[c] += v * (work[c][gi] - bg[c] - f[c] * (DL - v));
+      den += v * v;
+   }
+   if (den <= 0) return false;
+   var kl = [], ks = 0;
+   for (var c = 0; c < nc; ++c) { var k = Math.min(Math.max(num[c] / den, lo * kc[c]), hi * kc[c]); kl.push(k); ks += k; }
+   if (ks <= 0) return false;
+   for (var c = 0; c < nc; ++c) kc[c] = kl[c] / ks;
+   return true;
 };
 
 // Robust azimuthal profile (median over angle of valid samples) per radius index
@@ -680,17 +757,19 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
          log("OK   " + tag + ": no ghost detected"); ++nDone; continue;
       }
       // confidence: ghost amplitude vs residual structure around it. Weak ghost in structured
-      // nebula -> regular ring of the predicted colour; strong clear ghost -> full freedom.
+      // nebula -> regular round ring; strong clear ghost -> full shape freedom.
       var conf = gf.sigma > 0 ? gf.a / gf.sigma : 0;
       if (opts.dryRun) { s.status = "ok"; s.conf = conf; continue; }
       var fr0 = Math.min(Math.max((conf - p.confLo) / (p.confHi - p.confLo), 0), 1);
+      // physical ceiling: a fit above it has absorbed surrounding signal (nebula, neighbour),
+      // so the fit is discarded and the ghost falls back to the typical ghost of a star of this
+      // brightness: a round ring, without free correction
+      var hL = 0; for (var c = 0; c < nc; ++c) hL += an.starCol[c];
+      var capA = p.ratioCap * rho * Math.max(hL, 0), capped = false;
+      if (gf.a > capA) { gf.a = rho * Math.max(hL, 0); gf.bc = 0; gf.bs = 0; fr0 = 0; capped = true; }
       var lopNow = Math.sqrt(gf.bc * gf.bc + gf.bs * gf.bs), lopMax = p.maxLop * fr0 * gf.a;
       if (lopNow > lopMax) { var sl = lopNow > 0 ? lopMax / lopNow : 0; gf.bc *= sl; gf.bs *= sl; }
       var freeNow = p.freeBound * fr0;
-      var colLoNow = 1 - (1 - p.colLo) * fr0, colHiNow = 1 + (p.colHi - 1) * fr0;
-      var hL = 0; for (var c = 0; c < nc; ++c) hL += an.starCol[c];
-      var capA = p.ratioCap * rho * Math.max(hL, 0), capped = false;
-      if (gf.a > capA) { var f = capA > 0 ? capA / gf.a : 0; gf.a *= f; gf.bc *= f; gf.bs *= f; capped = true; }
       var shape = new Float64Array(nth * nr);
       for (var t = 0; t < nth; ++t) {
          var ang = gf.a + gf.bc * Math.cos(t * thStep) + gf.bs * Math.sin(t * thStep);
@@ -707,8 +786,9 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
             shape[k] = Math.max(shape[k] + dv, 0);
          }
       }
-      // local colour: per-channel amplitude on the final shape, kept within [colLo, colHi] x predicted colour
-      if (nc > 1 && colHiNow > colLoNow) {
+      if (nc > 1 && !GB.continuityColour(an, s, work, shape, kc, ctx, p.colLo, p.colHi)) {
+         // fallback: per-channel amplitude on the final shape, on the data with background and
+         // halos removed, kept within [colLo, colHi] x predicted colour
          var kl = [], ksum2 = 0;
          for (var c = 0; c < nc; ++c) {
             var okk = new Uint8Array(nth * nr), yv = new Float64Array(nth * nr), cnt = 0;
@@ -717,10 +797,8 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
                okk[k] = 1; yv[k] = an.pols[c][k]; ++cnt;
             }
             var kk = cnt > 50 ? GB.lsqRobust([shape], yv, nth * nr, okk, 5, 2.5, 2.5).coef[0] : kc[c];
-            kk = Math.min(Math.max(kk, colLoNow * kc[c]), colHiNow * kc[c]);
-            kl.push(kk); ksum2 += kk;
+            kl.push(Math.min(Math.max(kk, p.colLo * kc[c]), p.colHi * kc[c])); ksum2 += kl[c];
          }
-         // keep total luminance unchanged, only the colour split moves
          if (ksum2 > 0) for (var c = 0; c < nc; ++c) kc[c] = kl[c] / ksum2;
       }
       var peaks = [], x0 = an.x0, y0 = an.y0, w = an.w, h = an.h, r = an.r, tap = an.tap;

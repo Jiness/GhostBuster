@@ -101,6 +101,19 @@ manual star handling, parameter validation and robustness to invalid input. A se
 whole script, dialog included, against a minimal simulation of the PixInsight scripting API.
 They do not replace a check inside PixInsight itself.
 
+### Benchmark on real stacks
+
+`bench/run_bench.js` runs the processing core on your own FITS stacks, as the automated mode does,
+and writes for each image a contact sheet (raw | corrected, brightest stars) and per-star figures:
+
+```
+node bench/run_bench.js "path/to/folder/with/fits" --out bench-results
+```
+
+Results go to `bench-results/v<version>/` (`report.md`, `results.json` and one PNG per image).
+Only the contact sheets and figures are written; the FITS files and their headers stay on your
+machine. Published results: [bench-results](bench-results/).
+
 ## License
 
 Copyright (C) 2026 Jiness.

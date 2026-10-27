@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.1
+
+Fixes found on IC 1805 (Heart Nebula):
+
+- **Dark hole next to a star in bright red nebula.** When the fitted ghost exceeded the physical
+  ceiling (ratio cap), it was only scaled down and kept its free shape and colour, so it still
+  followed the nebula. A fit above the ceiling is now discarded: the star gets the typical ghost
+  for its brightness, as a round ring, without free correction.
+- **Green ring left around some stars.** The ghost colour came from a colour ratio learned on the
+  image, which picks up the colour of the nebula (red x1.3 to x1.6 depending on the image). The
+  colour split is now chosen so that the corrected disk keeps the colour of the star light just
+  outside the core, within the same bounds around the predicted colour. Where the background
+  varies strongly around the star, the previous per-channel fit is kept.
+- Tests: ghost colour per star, and a star next to a red emission patch (no sector of the
+  corrected disk over-subtracted). 37 tests.
+- New `bench/run_bench.js`: runs the automated mode on real FITS stacks and writes contact sheets
+  and per-star figures to `bench-results/v<version>/`, for comparison between versions.
+
 ## 0.1.0 (first public pre-release)
 
 Initial public version: ghost-ring removal for Dwarflab Draco duo-band stacks, interactive star
