@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
       - name: Processing core tests
         run: node tests/run_tests.js
       - name: Dialog tests (simulated PixInsight API)
@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
       - name: Prepare a parsable copy of the script
         run: node tests/lint_prepare.js
       - name: ESLint
