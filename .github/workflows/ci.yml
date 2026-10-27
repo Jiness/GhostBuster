@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Processing core tests
+        run: node tests/run_tests.js
+      - name: Dialog tests (simulated PixInsight API)
+        run: node tests/ui_test.js
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Prepare a parsable copy of the script
+        run: node tests/lint_prepare.js
+      - name: ESLint
+        run: npx --yes eslint@9.13.0 --max-warnings 0 build/GhostBuster.lint.js

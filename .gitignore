@@ -1,0 +1,39 @@
+# Image data and PixInsight working files
+*.fit
+*.fits
+*.fts
+*.xisf
+*.tif
+*.tiff
+*.raw
+
+# Development artefacts
+node_modules/
+*.log
+*.tmp
+*.bak
+*.orig
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Credentials and keys (must never be committed)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.kdbx
+id_rsa*
+id_ed25519*
+.npmrc
+.netrc
+.git-credentials
+credentials*
+secrets*
+build/

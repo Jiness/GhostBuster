@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check that the tag matches the script version
+        run: |
+          v=$(sed -n 's/^#define VERSION "\(.*\)"/\1/p' GhostBuster.js)
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME does not match script version $v"; exit 1; }
+      - name: Create the GitHub release (pre-release for 0.x versions)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flag=""
+          case "$GITHUB_REF_NAME" in v0.*) flag="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" GhostBuster.js LICENSE --title "GhostBuster $GITHUB_REF_NAME" --generate-notes $flag
