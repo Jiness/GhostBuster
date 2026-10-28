@@ -27,7 +27,9 @@
 //      signal, with neighbouring stars masked. It is fitted with the learned
 //      shape (radius adjusted per star, limited lopsidedness), then refined by
 //      a bounded free correction. A fit above the physical ceiling (ratio
-//      cap) has absorbed nebula and falls back to the typical ghost.
+//      cap) has absorbed nebula and falls back to the typical ghost. The
+//      subtraction never removes more light than there is above the local
+//      background, per sector, radial band and channel.
 //   4. Ghost colour: split chosen so that the corrected disk keeps the colour
 //      of the star light around it, within bounds around the predicted colour
 //      (star colour x learned colour ratio).
@@ -36,8 +38,8 @@
 //      rings.
 //
 // USAGE
-//   * Linear data only, after background extraction, before deconvolution
-//     and before star removal.
+//   * Linear data only. Workflow: background extraction -> GhostBuster ->
+//     SPCC -> BlurXTerminator -> NoiseXTerminator -> StarXTerminator.
 //   * Automated mode reads the pixel scale from the header (astrometric
 //     solution, else pixel size and focal length, else image size) and
 //     derives every setting. Manual mode exposes the settings.
@@ -47,12 +49,12 @@
 //   * Outputs: <id>_deghosted and, optionally, <id>_ghost (removed signal).
 //     The source image is not modified.
 //
-// Version 0.1.3
+// Version 0.1.5
 // ****************************************************************************
 
 #feature-id    Utilities > GhostBuster
 #feature-info  Removes reflection ghost rings around bright saturated stars \
-               on linear images. Run before deconvolution and star removal.
+               on linear images. Run before SPCC, deconvolution and star removal.
 
 #include <pjsr/NumericControl.jsh>
 #include <pjsr/StdButton.jsh>
@@ -62,7 +64,7 @@
 #include <pjsr/SampleType.jsh>
 
 #define TITLE   "GhostBuster"
-#define VERSION "0.1.3"
+#define VERSION "0.1.5"
 // PixInsight version as a string (the predefined macros expand to bare numbers)
 #ifdef __PI_MAJOR__
 #define GB_PI_VERSION (__PI_MAJOR__ + "." + __PI_MINOR__ + "." + __PI_RELEASE__)
@@ -84,7 +86,10 @@ GB.defaults = function () {
       annOut       : 46,    // ghost annulus outer radius (px)
       gateK        : 8.0,   // skip a star if halo-fit residual > gateK x image noise
       nHarm        : 3,     // angular harmonics for the ghost estimate in sparse fields
-      maxStars     : 200,   // candidates kept (largest saturated cores first), bounds the analysis time
+      maxStars     : 200,
+      minCoreArea  : 20,    // stars with a smaller saturated core are proposed unselected (orange):
+                            // StarXTerminator removes their ghost with the star, and correcting
+                            // them beforehand makes it dig a dark hole at their place   // candidates kept (largest saturated cores first), bounds the analysis time
       maxLop       : 0.6,   // max lopsidedness of the ghost (fraction of its mean level)
       ratioCap     : 3.0,   // ghost may not exceed ratioCap x the typical ghost/star ratio
       freeBound    : 1.0,   // free correction allowed around the fitted shape (fraction of it)
@@ -268,7 +273,7 @@ GB.validate = function (p) {
    num("annIn", 2, 500);          num("annOut", 6, 1000);
    num("rOut", 16, 2000);         num("gateK", 0.1, 1e3);
    num("nHarm", 1, 6);            num("maxLop", 0, 1);
-   num("maxStars", 1, 5000);
+   num("maxStars", 1, 5000);       num("minCoreArea", 0, 100000);
    num("ratioCap", 0.1, 100);     num("freeBound", 0, 10);
    num("colLo", 0.01, 1);         num("colHi", 1, 100);
    num("bgSpread", 0, 1000);
@@ -291,7 +296,7 @@ GB.scaled = function (p0) {
    var p = GB.validate(p0);
    var q = {}; for (var k in p) q[k] = p[k];
    var s = p.scale;
-   q.rOut = p.rOut * s; q.annIn = p.annIn * s; q.annOut = p.annOut * s; q.coreMin = p.coreMin * s;
+   q.rOut = p.rOut * s; q.annIn = p.annIn * s; q.annOut = p.annOut * s; q.coreMin = p.coreMin * s; q.minCoreArea = p.minCoreArea * s * s;
    q.edgeTaper = p.edgeTaper * s; q.rStep = p.rStep * s; q.minArea = Math.max(1, Math.round(p.minArea * s * s));
    q.satDilate = Math.max(1, Math.round(p.satDilate * s));
    q.maxArea = Math.round(p.maxArea * s * s);
@@ -820,22 +825,57 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
          if (ksum2 > 0) for (var c = 0; c < nc; ++c) kc[c] = kl[c] / ksum2;
       }
       var peaks = [], x0 = an.x0, y0 = an.y0, w = an.w, h = an.h, r = an.r, tap = an.tap;
+      // ghost value per pixel (before colour) and its cell (sector x radial band), shared by the channels
+      var NS = 16, NB = Math.max(2, Math.round((p.annOut - p.annIn) / (4 * p.scale))), NC = NS * NB;
+      var gv = new Float64Array(w * h), cu = new Float64Array(w * h), cv = new Float64Array(w * h);
+      for (var j = 0; j < h; ++j) for (var i = 0; i < w; ++i) {
+         var q = j * w + i;
+         if (tap[q] <= 0) continue;
+         var dx = x0 + i - s.x, dy = y0 + j - s.y;
+         var th = Math.atan2(dy, dx); if (th < 0) th += 2 * Math.PI;
+         var ti = th / thStep, ri = (r[q] - p.annIn) / p.rStep;
+         ti = Math.min(Math.max(ti, 0), nth); ri = Math.min(Math.max(ri, 0), nr - 1);
+         var it0 = Math.floor(ti), ir0 = Math.floor(ri), ft = ti - it0, fr2 = ri - ir0;
+         var it1 = Math.min(it0 + 1, nth), ir1 = Math.min(ir0 + 1, nr - 1);
+         var ta = (it0 % nth) * nr, tb = (it1 % nth) * nr;
+         gv[q] = ((1 - ft) * (1 - fr2) * shape[ta + ir0] + ft * (1 - fr2) * shape[tb + ir0] + (1 - ft) * fr2 * shape[ta + ir1] + ft * fr2 * shape[tb + ir1]) * tap[q];
+         cu[q] = th / (2 * Math.PI) * NS;
+         cv[q] = Math.min(Math.max((r[q] - p.annIn) / (p.annOut - p.annIn), 0), 0.999) * NB;
+      }
+      // never remove more light than there is above the local background: in each cell and channel
+      // the ghost is scaled down to the light available, so that a dark lane next to the star or a
+      // ghost colour slightly off cannot leave a dark hole
+      var nLim = 0;
       for (var c = 0; c < nc; ++c) {
-         var pk = 0, kk = kc[c];
-         for (var j = 0; j < h; ++j) for (var i = 0; i < w; ++i) {
-            var q = j * w + i;
-            if (tap[q] <= 0) continue;
-            var dx = x0 + i - s.x, dy = y0 + j - s.y;
-            var th = Math.atan2(dy, dx); if (th < 0) th += 2 * Math.PI;
-            var ti = th / thStep, ri = (r[q] - p.annIn) / p.rStep;
-            ti = Math.min(Math.max(ti, 0), nth); ri = Math.min(Math.max(ri, 0), nr - 1);
-            var it0 = Math.floor(ti), ir0 = Math.floor(ri), ft = ti - it0, fr2 = ri - ir0;
-            var it1 = Math.min(it0 + 1, nth), ir1 = Math.min(ir0 + 1, nr - 1);
-            var ta = (it0 % nth) * nr, tb = (it1 % nth) * nr;
-            var v = (1 - ft) * (1 - fr2) * shape[ta + ir0] + ft * (1 - fr2) * shape[tb + ir0] + (1 - ft) * fr2 * shape[ta + ir1] + ft * fr2 * shape[tb + ir1];
-            var g = kk * v * tap[q];
+         var pk = 0, kk = kc[c], ring = [];
+         for (var q = 0; q < w * h; ++q) {
+            if (r[q] < p.rOut - 10 * p.scale || r[q] > p.rOut || an.exE[q]) continue;
+            ring.push(work[c][(y0 + Math.floor(q / w)) * W + x0 + q % w]);
+         }
+         if (ring.length < 20) continue;
+         ring.sort(function (a1, a2) { return a1 - a2; });
+         var bgc = ring[Math.floor(ring.length * 0.5)];
+         var gS = new Float64Array(NC), dS = new Float64Array(NC), fk = new Float64Array(NC);
+         for (var q = 0; q < w * h; ++q) {
+            if (gv[q] <= 0) continue;
+            var cell = Math.min(Math.floor(cu[q]), NS - 1) * NB + Math.floor(cv[q]);
+            gS[cell] += kk * gv[q]; dS[cell] += work[c][(y0 + Math.floor(q / w)) * W + x0 + q % w] - bgc;
+         }
+         var lim = false;
+         for (var k = 0; k < NC; ++k) {
+            fk[k] = gS[k] > 0 ? Math.min(Math.max(dS[k] / gS[k], 0), 1) : 1;
+            if (fk[k] < 0.9 && gS[k] > 0) lim = true;
+         }
+         if (lim) ++nLim;
+         for (var q = 0; q < w * h; ++q) {
+            if (gv[q] <= 0) continue;
+            // bilinear interpolation of the cell factors (circular in angle)
+            var u = cu[q] - 0.5, k0 = Math.floor(u), a0 = u - k0, vb = cv[q] - 0.5, b0 = Math.floor(vb), b1 = vb - b0;
+            var s0 = ((k0 % NS) + NS) % NS, s1 = (s0 + 1) % NS, r0 = Math.min(Math.max(b0, 0), NB - 1), r1 = Math.min(Math.max(b0 + 1, 0), NB - 1);
+            var f = (1 - a0) * ((1 - b1) * fk[s0 * NB + r0] + b1 * fk[s0 * NB + r1]) + a0 * ((1 - b1) * fk[s1 * NB + r0] + b1 * fk[s1 * NB + r1]);
+            var g = kk * gv[q] * f;
             if (g > 0) {
-               var gi = (y0 + j) * W + x0 + i;
+               var gi = (y0 + Math.floor(q / w)) * W + x0 + q % w;
                ghost[c][gi] += g; work[c][gi] -= g;
                if (g > pk) pk = g;
             }
@@ -843,7 +883,8 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
          peaks.push(pk);
       }
       ++nDone;
-      log("OK   " + tag + ": ghost removed (confidence " + conf.toFixed(1) + "; " + an.masked + " neighbour stars masked" + (capped ? ", capped" : "") + "), peak " +
+      log("OK   " + tag + ": ghost removed (confidence " + conf.toFixed(1) + "; " + an.masked + " neighbour stars masked" + (capped ? ", capped" : "") +
+          (nLim ? ", limited to the light available in " + nLim + " channel(s)" : "") + "), peak " +
           peaks.map(function (v) { return v.toExponential(2); }).join(" / "));
    }
    return { ghost: ghost, done: nDone, skipped: nSkip, total: stars.length, templateSource: src, stars: stars };
@@ -1234,11 +1275,11 @@ function GB_Dialog(win, params, chans) {
       processEvents();
       var t0 = Date.now();
       var res = GB.process(self.chans, W, H, self.effectiveParams(), null, function () {}, { dryRun: true, progress: GB_progress() });
-      var p = self.effectiveParams(), marks = [];
+      var p = self.effectiveParams(), ps = GB.scaled(p), marks = [];
       for (var i = 0; i < res.stars.length; ++i) {
          var s = res.stars[i];
          if (s.manual) continue;
-         var cls = (s.status == "ok" && s.conf >= p.confLo) ? "white" : "orange";
+         var cls = (s.status == "ok" && s.conf >= p.confLo && s.area >= ps.minCoreArea) ? "white" : "orange";
          var key = GB_key(s.x, s.y);
          var on = (key in self.override) ? self.override[key] : (cls == "white");
          marks.push({ x: s.x, y: s.y, cls: cls, on: on, status: s.status, conf: s.conf || 0 });
@@ -1256,8 +1297,9 @@ function GB_Dialog(win, params, chans) {
    this.helpLabel.minWidth = 340;
    this.helpLabel.maxWidth = 380;
    this.helpLabel.text = "<p><b>" + TITLE + " v" + VERSION + "</b></p>" +
-      "<p>Removes reflection ghost rings around bright saturated stars. Run it on <b>linear</b> data, " +
-      "before BlurXTerminator and StarXTerminator. The original image is not modified.</p>" +
+      "<p>Removes reflection ghost rings around bright saturated stars, on <b>linear</b> data. " +
+      "Workflow: background extraction &rarr; <b>GhostBuster</b> &rarr; SPCC &rarr; BlurXTerminator &rarr; " +
+      "NoiseXTerminator &rarr; StarXTerminator. The original image is not modified.</p>" +
       "<p>Target: <b>" + GB_esc(win.mainView.id) + "</b> (" + W + " x " + H + ")</p>";
 
    this.legendLabel = new Label(this);
@@ -1266,7 +1308,7 @@ function GB_Dialog(win, params, chans) {
    this.legendLabel.maxWidth = 380;
    this.legendLabel.text =
       "<p><b>White</b> circle: will be corrected.<br>" +
-      "<b><span style='color:#e07010'>Orange</span></b>: uncertain (nebula or weak ghost), NOT corrected until you click it.<br>" +
+      "<b><span style='color:#e07010'>Orange</span></b>: uncertain (nebula, weak ghost, or small star whose ghost StarXTerminator removes), NOT corrected until you click it.<br>" +
       "<b><span style='color:#808080'>Grey</span></b>: excluded.<br>" +
       "<b><span style='color:#20a040'>Green</span></b>: star you added.</p>" +
       "<p>Click a circle to switch it on/off. Click a star without a circle to add it; click a green circle to remove it.</p>" +

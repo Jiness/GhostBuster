@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.5
+
+- Safety limit on the subtraction: in each of 16 sectors x radial bands and in each channel, the
+  ghost removed never exceeds the light above the local background (median of a ring outside the
+  ghost). It removes small dips where the ghost colour was slightly off (one side of a star on the
+  edge of M42 ended below the background in the red channel).
+- Stars with a small saturated core (below 20 px at the reference scale, `minCoreArea`) are now
+  proposed unselected (orange). Measured on M42 after the full workflow: StarXTerminator removes
+  their ghost together with the star, and correcting them beforehand made it dig a dark hole at
+  their place. They can still be selected by clicking them.
+- The dialog states the expected workflow: background extraction, GhostBuster, SPCC,
+  BlurXTerminator, NoiseXTerminator, StarXTerminator.
+
 ## 0.1.3
 
 - Author credit in the dialog.

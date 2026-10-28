@@ -223,7 +223,7 @@ function main() {
       const dry = GB.process(im.chans, im.W, im.H, p, null, () => {}, { dryRun: true });
       const key = s => Math.round(s.x) + "," + Math.round(s.y);
       const pq = GB.scaled(p), chosen = {};
-      for (const s of dry.stars) if (all || (s.status === "ok" && s.conf >= pq.confLo)) chosen[key(s)] = s;
+      for (const s of dry.stars) if (all || (s.status === "ok" && s.conf >= pq.confLo && s.area >= pq.minCoreArea)) chosen[key(s)] = s;
       process.stdout.write("correcting... ");
       const t0 = Date.now(), log = [];
       const res = GB.process(im.chans, im.W, im.H, p, s => !!chosen[key(s)], m => log.push(m));
