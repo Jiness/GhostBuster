@@ -248,6 +248,47 @@ console.log("Analysis and manual stars");
    });
 }
 
+console.log("Reuse of analyses");
+{
+   const f = makeField({ seed: 3, bright: 5 });
+   const same = (a, b) => a.length === b.length && a.every((g, c) => g.every((v, i) => v === b[c][i]));
+   const run = (p, opts) => { const log = []; const r = GB.process(f.chans, f.W, f.H, p, null, m => log.push(m), opts); return { r, log }; };
+   test("lsqRobust: a shared design gives the same fit", () => {
+      const n = 300, cols = [new Float64Array(n), new Float64Array(n), new Float64Array(n)], ok = new Uint8Array(n);
+      const y1 = new Float64Array(n), y2 = new Float64Array(n);
+      for (let i = 0; i < n; ++i) {
+         cols[0][i] = 1; cols[1][i] = i / n; cols[2][i] = Math.sin(i); ok[i] = i % 17 ? 1 : 0;
+         y1[i] = 1 + 2 * cols[1][i] + (i % 9 == 0 ? 5 : 0); y2[i] = 3 * cols[2][i] - (i % 7 == 0 ? 4 : 0);
+      }
+      const D = GB.design(cols, n, ok);
+      for (const y of [y1, y2]) assert.deepStrictEqual(GB.lsqRobust(cols, y, n, ok, 5, 2.5, 4, D), GB.lsqRobust(cols, y, n, ok, 5, 2.5, 4));
+   });
+   test("run after a dry run with the same cache: same result, fewer star analyses", () => {
+      const fresh = run(GB.defaults());
+      const orig = GB.analyseStar;
+      let calls = 0;
+      GB.analyseStar = function () { ++calls; return orig.apply(this, arguments); };
+      try {
+         const cache = {};
+         run(GB.defaults(), { dryRun: true, cache });
+         const c0 = calls;
+         const again = run(GB.defaults(), { cache });
+         assert.ok(same(fresh.r.ghost, again.r.ghost), "ghost differs");
+         assert.deepStrictEqual(fresh.log, again.log);
+         assert.ok(calls - c0 < c0, (calls - c0) + " analyses in the run, " + c0 + " in the dry run");
+      } finally { GB.analyseStar = orig; }
+   });
+   test("cache: a manual star next to a star and a changed setting give the fresh result", () => {
+      const s0 = f.stars.find(s => s.ghost);
+      const extra = [{ x: s0.x + 60, y: s0.y }];
+      const cache = {};
+      run(GB.defaults(), { dryRun: true, cache });
+      assert.ok(same(run(GB.defaults(), { extra }).r.ghost, run(GB.defaults(), { extra, cache }).r.ghost), "manual star");
+      const p2 = Object.assign(GB.defaults(), { gateK: 4 });
+      assert.ok(same(run(p2).r.ghost, run(p2, { cache }).r.ghost), "changed setting");
+   });
+}
+
 console.log("PixInsight preprocessor");
 test("no '//' inside code: the PJSR preprocessor takes it for a comment, even in strings and regexes", () => {
    const lines = require("fs").readFileSync(require("path").join(__dirname, "..", "GhostBuster.js"), "utf8").split("\n");

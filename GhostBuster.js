@@ -64,7 +64,7 @@
 #include <pjsr/SampleType.jsh>
 
 #define TITLE   "GhostBuster"
-#define VERSION "0.1.5"
+#define VERSION "0.1.6"
 // PixInsight version as a string (the predefined macros expand to bare numbers)
 #ifdef __PI_MAJOR__
 #define GB_PI_VERSION (__PI_MAJOR__ + "." + __PI_MINOR__ + "." + __PI_RELEASE__)
@@ -86,10 +86,10 @@ GB.defaults = function () {
       annOut       : 46,    // ghost annulus outer radius (px)
       gateK        : 8.0,   // skip a star if halo-fit residual > gateK x image noise
       nHarm        : 3,     // angular harmonics for the ghost estimate in sparse fields
-      maxStars     : 200,
+      maxStars     : 200,   // candidates kept (largest saturated cores first), bounds the analysis time
       minCoreArea  : 20,    // stars with a smaller saturated core are proposed unselected (orange):
                             // StarXTerminator removes their ghost with the star, and correcting
-                            // them beforehand makes it dig a dark hole at their place   // candidates kept (largest saturated cores first), bounds the analysis time
+                            // them beforehand makes it dig a dark hole at their place
       maxLop       : 0.6,   // max lopsidedness of the ghost (fraction of its mean level)
       ratioCap     : 3.0,   // ghost may not exceed ratioCap x the typical ghost/star ratio
       freeBound    : 1.0,   // free correction allowed around the fitted shape (fraction of it)
@@ -168,44 +168,77 @@ GB.solve = function (ata, aty, m) {
    return x;
 };
 
+// Design matrix of a least-squares fit, packed row by row on the usable rows (ok), with the
+// normal matrix of the first iteration. Fits sharing the same columns and usable rows (the halo
+// fit of the luminance and of each channel) build it once.
+GB.design = function (cols, n, ok) {
+   var m = cols.length, idx = [];
+   for (var i = 0; i < n; ++i) if (ok[i]) idx.push(i);
+   var nk = idx.length, A = new Float64Array(nk * m), ata0 = new Float64Array(m * m);
+   for (var r = 0; r < nk; ++r) {
+      var i = idx[r], o = r * m;
+      for (var a = 0; a < m; ++a) A[o + a] = cols[a][i];
+      for (var a = 0; a < m; ++a) {
+         var va = A[o + a], ra = a * m;
+         for (var b = a; b < m; ++b) ata0[ra + b] += va * A[o + b];
+      }
+   }
+   for (var a = 0; a < m; ++a) for (var b = 0; b < a; ++b) ata0[a * m + b] = ata0[b * m + a];
+   return { A: A, idx: idx, nk: nk, m: m, ata0: ata0 };
+};
+
 // Robust least squares. cols: array of m Float64Array(n); y: Float64Array(n); ok: Uint8Array(n) initial usable rows
-GB.lsqRobust = function (cols, y, n, ok, iters, clipHi, clipLo) {
-   var m = cols.length, w = new Uint8Array(n), res = new Float64Array(n), tmp = new Float64Array(n);
-   for (var i = 0; i < n; ++i) w[i] = ok[i];
+// D (optional): GB.design(cols, n, ok), when several fits share the same columns and usable rows
+GB.lsqRobust = function (cols, y, n, ok, iters, clipHi, clipLo, D) {
+   D = D || GB.design(cols, n, ok);
+   var m = D.m, nk = D.nk, A = D.A, idx = D.idx;
+   var w = new Uint8Array(nk), res = new Float64Array(nk), tmp = new Float64Array(nk), yk = new Float64Array(nk);
+   for (var r = 0; r < nk; ++r) { w[r] = 1; yk[r] = y[idx[r]]; }
    var coef = new Float64Array(m), sigma = 0;
    for (var it = 0; it < iters; ++it) {
-      var ata = new Float64Array(m * m), aty = new Float64Array(m), cnt = 0;
-      for (var i = 0; i < n; ++i) {
-         if (!w[i]) continue;
-         ++cnt;
-         for (var a = 0; a < m; ++a) {
-            var va = cols[a][i];
-            aty[a] += va * y[i];
-            for (var b = a; b < m; ++b) ata[a * m + b] += va * cols[b][i];
+      var ata, aty = new Float64Array(m), cnt = 0;
+      if (it == 0) {
+         ata = D.ata0; cnt = nk;
+         for (var r = 0; r < nk; ++r) { var o = r * m, yr = yk[r]; for (var a = 0; a < m; ++a) aty[a] += A[o + a] * yr; }
+      } else {
+         ata = new Float64Array(m * m);
+         for (var r = 0; r < nk; ++r) {
+            if (!w[r]) continue;
+            ++cnt;
+            var o = r * m, yr = yk[r];
+            for (var a = 0; a < m; ++a) {
+               var va = A[o + a], ra = a * m;
+               aty[a] += va * yr;
+               for (var b = a; b < m; ++b) ata[ra + b] += va * A[o + b];
+            }
          }
+         for (var a = 0; a < m; ++a) for (var b = 0; b < a; ++b) ata[a * m + b] = ata[b * m + a];
       }
       if (cnt < m) break;
-      for (var a = 0; a < m; ++a) for (var b = 0; b < a; ++b) ata[a * m + b] = ata[b * m + a];
       coef = GB.solve(ata, aty, m);
       var k = 0;
-      for (var i = 0; i < n; ++i) {
-         var s = 0;
-         for (var a = 0; a < m; ++a) s += coef[a] * cols[a][i];
-         res[i] = y[i] - s;
-         if (w[i]) tmp[k++] = res[i];
+      for (var r = 0; r < nk; ++r) {
+         var s = 0, o = r * m;
+         for (var a = 0; a < m; ++a) s += coef[a] * A[o + a];
+         res[r] = yk[r] - s;
+         if (w[r]) tmp[k++] = res[r];
       }
       var med = GB.median(tmp, k);
       for (var i = 0; i < k; ++i) tmp[i] = Math.abs(tmp[i] - med);
       sigma = 1.4826 * GB.median(tmp, k) + 1e-12;
       // clip around the median residual; keep the previous selection if everything would be rejected
       var kept = 0;
-      for (var i = 0; i < n; ++i) {
-         var d = res[i] - med;
-         tmp[i] = ok[i] && d < clipHi * sigma && d > -clipLo * sigma ? 1 : 0;
-         kept += tmp[i];
+      for (var r = 0; r < nk; ++r) {
+         var d = res[r] - med;
+         tmp[r] = d < clipHi * sigma && d > -clipLo * sigma ? 1 : 0;
+         kept += tmp[r];
       }
       if (kept < m) break;
-      for (var i = 0; i < n; ++i) w[i] = tmp[i];
+      // same rows as this iteration: the next ones would give the same result
+      var same = true;
+      for (var r = 0; r < nk; ++r) if (w[r] != tmp[r]) { same = false; break; }
+      if (same) break;
+      for (var r = 0; r < nk; ++r) w[r] = tmp[r];
    }
    return { coef: coef, sigma: sigma };
 };
@@ -408,20 +441,43 @@ GB.compactMask = function (L, w, h, sigL, scale, centerX, centerY, minDist) {
    return { mask: mask, count: found };
 };
 
-// Analyses one star: halo/background fit, neighbour masking, polar excess per channel.
-// Returns { ok: false, gateRatio } when the surroundings are too structured (unless ignoreGate),
-// otherwise { ok: true, gateRatio, pols, polL, tap, starCol, masked, ... }.
-GB.analyseStar = function (ctx, s, work, ignoreGate) {
-   var p = ctx.p, W = ctx.W, H = ctx.H, nc = ctx.nc, R = p.rOut, stars = ctx.stars, excl = ctx.excl;
-   var x0 = Math.floor(Math.max(s.x - R, 0)), x1 = Math.floor(Math.min(s.x + R + 1, W));
-   var y0 = Math.floor(Math.max(s.y - R, 0)), y1 = Math.floor(Math.min(s.y + R + 1, H));
-   var w = x1 - x0, h = y1 - y0, n = w * h;
-   var nbrs = [];
+// Analysis window of a star: pixels [x0, x1) x [y0, y1)
+GB.window = function (ctx, s) {
+   var R = ctx.p.rOut;
+   return { x0: Math.floor(Math.max(s.x - R, 0)), x1: Math.floor(Math.min(s.x + R + 1, ctx.W)),
+            y0: Math.floor(Math.max(s.y - R, 0)), y1: Math.floor(Math.min(s.y + R + 1, ctx.H)) };
+};
+
+// Stars whose halo reaches the analysis window of s
+GB.neighbours = function (ctx, s) {
+   var p = ctx.p, R = p.rOut, stars = ctx.stars, nbrs = [];
    for (var oi = 0; oi < stars.length; ++oi) {
       var o = stars[oi];
       if (o === s) continue;
       if (Math.sqrt((o.x - s.x) * (o.x - s.x) + (o.y - s.y) * (o.y - s.y)) <= R + p.annOut) nbrs.push(o);
    }
+   return nbrs;
+};
+
+// Distance of every window pixel to the star centre
+GB.radii = function (s, x0, y0, w, h) {
+   var r = new Float64Array(w * h);
+   for (var j = 0; j < h; ++j) for (var i = 0; i < w; ++i) {
+      var dx = x0 + i - s.x, dy = y0 + j - s.y;
+      r[j * w + i] = Math.sqrt(dx * dx + dy * dy);
+   }
+   return r;
+};
+
+// Analyses one star: halo/background fit, neighbour masking, polar excess per channel.
+// Returns { ok: false, gateRatio } when the surroundings are too structured (unless ignoreGate),
+// otherwise { ok: true, gateRatio, pols, polL, tap, starCol, masked, ... }.
+// nbrs (optional): GB.neighbours(ctx, s)
+GB.analyseStar = function (ctx, s, work, ignoreGate, nbrs) {
+   var p = ctx.p, W = ctx.W, nc = ctx.nc, R = p.rOut, excl = ctx.excl;
+   var win = GB.window(ctx, s), x0 = win.x0, x1 = win.x1, y0 = win.y0, y1 = win.y1;
+   var w = x1 - x0, h = y1 - y0, n = w * h;
+   nbrs = nbrs || GB.neighbours(ctx, s);
    var cols = [];
    for (var k = 0; k < 6; ++k) cols.push(new Float64Array(n));
    var r = new Float64Array(n), ex = new Uint8Array(n), ann = new Uint8Array(n), fit = new Uint8Array(n);
@@ -446,7 +502,8 @@ GB.analyseStar = function (ctx, s, work, ignoreGate) {
       for (var c = 0; c < nc; ++c) vv += work[c][(y0 + yq) * W + x0 + xq];
       Lw[q] = vv;
    }
-   var gate = GB.lsqRobust(cols, Lw, n, fit, p.iters, p.clipHi, p.clipLo);
+   var D = GB.design(cols, n, fit);
+   var gate = GB.lsqRobust(cols, Lw, n, fit, p.iters, p.clipHi, p.clipLo, D);
    var res = { x0: x0, y0: y0, w: w, h: h, r: r, gateRatio: gate.sigma / ctx.sig };
    if (gate.sigma > p.gateK * ctx.sig && !ignoreGate) return res;
    var cm = GB.compactMask(Lw, w, h, ctx.sigL, p.scale, s.x - x0, s.y - y0, p.annIn * 0.75);
@@ -485,7 +542,7 @@ GB.analyseStar = function (ctx, s, work, ignoreGate) {
    for (var c = 0; c < nc; ++c) {
       var yc = new Float64Array(n);
       for (var q = 0; q < n; ++q) { var xq = q % w, yq = (q - xq) / w; yc[q] = work[c][(y0 + yq) * W + x0 + xq]; }
-      var fr = GB.lsqRobust(cols, yc, n, fit, p.iters, p.clipHi, p.clipLo);
+      var fr = GB.lsqRobust(cols, yc, n, fit, p.iters, p.clipHi, p.clipLo, D);
       var E = new Float64Array(n);
       for (var q = 0; q < n; ++q) {
          var mv = 0;
@@ -643,8 +700,24 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
    var tick = function (stage, i, n) {
       if (opts.progress && opts.progress(stage, i, n)) throw new Error("Aborted by the user.");
    };
+   // Detection and star analyses are kept and reused: by the learning passes, by the correction
+   // pass for the stars whose window no earlier correction has modified, and by the next call with
+   // the same image and settings (opts.cache: an object kept by the caller, e.g. from the dialog
+   // analysis to the run). Whatever is reused is what would be computed again.
+   var cache = opts.cache || {}, csig = W + "x" + H + "x" + nc, dflt = GB.defaults();
+   for (var k in dflt) csig += ";" + k + "=" + String(p[k]);
+   if (cache.sig !== csig || cache.chans !== chans) { cache.sig = csig; cache.chans = chans; cache.map = {}; cache.det = null; }
    tick("Detecting saturated stars", 0, 1);
-   var det = GB.detect(chans, W, H, p), stars = det.stars, sat = det.sat, nDet = stars.length;
+   if (!cache.det) {
+      var det0 = GB.detect(chans, W, H, p), sg = [];
+      for (var c = 0; c < nc; ++c) sg.push(GB.noise(chans[c], W, H));
+      cache.det = { stars: det0.stars, sat: det0.sat, noise: sg };
+   }
+   var stars = [], sat = cache.det.sat, nDet = cache.det.stars.length;
+   for (var si = 0; si < nDet; ++si) {
+      var d0 = cache.det.stars[si];
+      stars.push({ x: d0.x, y: d0.y, rs: d0.rs, area: d0.area });
+   }
    // the largest saturated cores come first: beyond maxStars, the rest is left out
    if (nDet > p.maxStars) stars = stars.slice(0, p.maxStars);
    if (opts.extra) {
@@ -667,7 +740,7 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
       }
    }
    var sig = 0, sig2 = 0;
-   for (var c = 0; c < nc; ++c) { var sc = GB.noise(chans[c], W, H); sig += sc; sig2 += sc * sc; }
+   for (var c = 0; c < nc; ++c) { var sc = cache.det.noise[c]; sig += sc; sig2 += sc * sc; }
    var excl = new Uint8Array(N);
    for (var i = 0; i < N; ++i) excl[i] = sat[i];
    for (var si = 0; si < stars.length; ++si) {
@@ -680,6 +753,36 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
                thStep: p.thStepDeg * Math.PI / 180, nth: Math.round(360 / p.thStepDeg),
                nr: Math.floor((p.annOut - p.annIn) / p.rStep + 1e-6) + 1 };
    var nth = ctx.nth, nr = ctx.nr, thStep = ctx.thStep;
+
+   var touched = [];
+   var isTouched = function (b) {
+      for (var ti = 0; ti < touched.length; ++ti) {
+         var t = touched[ti];
+         if (b.x0 < t.x1 && t.x0 < b.x1 && b.y0 < t.y1 && t.y0 < b.y1) return true;
+      }
+      return false;
+   };
+   var analysis = function (s, src, force) {
+      var nb = GB.neighbours(ctx, s), nsig = "";
+      for (var oi = 0; oi < nb.length; ++oi) nsig += nb[oi].x + "," + nb[oi].y + ";";
+      var key = s.x + "," + s.y, e = cache.map[key], win = GB.window(ctx, s);
+      var clean = src === chans || !isTouched(win);
+      if (clean && e && e.nsig === nsig && (e.an.ok || !force)) {
+         var an = {};
+         for (var f in e.an) an[f] = e.an[f];
+         an.r = GB.radii(s, an.x0, an.y0, an.w, an.h);
+         an.entry = e;
+         return an;
+      }
+      var an = GB.analyseStar(ctx, s, src, force, nb);
+      if (clean && !force) {
+         var keep = {};
+         for (var f in an) if (f != "r") keep[f] = an[f];
+         cache.map[key] = { nsig: nsig, an: keep };
+         an.entry = cache.map[key];
+      }
+      return an;
+   };
    log("Detected " + nDet + " saturated stars" + (nDet > p.maxStars ? "; the " + p.maxStars + " largest are kept." : "."));
 
    // ---- pass 1: learn the ghost radial shape on clean (dark-sky) stars ----
@@ -687,7 +790,7 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
    for (var si = 0; si < stars.length && profs.length < 25; ++si) {
       if (stars[si].manual) continue;
       tick("Learning the ghost shape", si, stars.length);
-      var an = GB.analyseStar(ctx, stars[si], chans);
+      var an = analysis(stars[si], chans, false);
       if (!an.ok || an.gateRatio > 3) continue;
       var pr = GB.azProfile(an.polL, nth, nr), mx = 0, nanCount = 0;
       for (var j = 0; j < nr; ++j) { if (isNaN(pr[j])) ++nanCount; else if (pr[j] > mx) mx = pr[j]; }
@@ -725,7 +828,7 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
    for (var si = 0; si < stars.length && ratios.length < 25; ++si) {
       if (stars[si].manual) continue;
       tick("Learning the ghost intensity", si, stars.length);
-      var an = GB.analyseStar(ctx, stars[si], chans);
+      var an = analysis(stars[si], chans, false);
       if (!an.ok || an.gateRatio > 3) continue;
       var hL = 0; for (var c = 0; c < nc; ++c) hL += an.starCol[c];
       var gf = GB.fitTemplate(an.polL, T, nth, nr, thStep, p.maxLop);
@@ -757,7 +860,7 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
       var tag = "(" + Math.round(s.x) + ", " + Math.round(s.y) + ")";
       tick(opts.dryRun ? "Analysing stars" : "Correcting stars", si, stars.length);
       var force = !!(s.manual || (opts.forceFn && opts.forceFn(s)));
-      var an = GB.analyseStar(ctx, s, work, force);
+      var an = analysis(s, work, force);
       if (!an.ok && opts.dryRun) { s.status = "gate"; s.conf = 0; continue; }
       if (!an.ok) {
          log("SKIP " + tag + ": residual " + Math.round(an.gateRatio) + "x noise (bright structured nebula)");
@@ -769,11 +872,20 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
       for (var c = 0; c < nc; ++c) kc[c] = ksum > 0 ? kc[c] / ksum : 1 / nc;
       var polG = an.polL;
       // radial stretch of the learned shape for this star (best of a small grid)
-      var gf = null, Ts = T;
-      for (var al = 0.85; al <= 1.151; al += 0.025) {
-         var Ta = GB.stretchTemplate(T, nr, p.annIn, p.rStep, al);
-         var g1 = GB.fitTemplate(polG, Ta, nth, nr, thStep, p.maxLop);
-         if (g1 && (!gf || g1.sigma < gf.sigma)) { gf = g1; Ts = Ta; }
+      // (kept with the analysis: the run after the dialog analysis finds it there)
+      var gf = null, Ts = T, gr = an.entry ? an.entry.grid : null, sameT = !!gr;
+      for (var j = 0; sameT && j < nr; ++j) if (gr.T[j] !== T[j]) sameT = false;
+      if (sameT) {
+         if (gr.gf) gf = { a: gr.gf.a, bc: gr.gf.bc, bs: gr.gf.bs, sigma: gr.gf.sigma };
+         Ts = gr.Ts;
+      } else {
+         for (var al = 0.85; al <= 1.151; al += 0.025) {
+            var Ta = GB.stretchTemplate(T, nr, p.annIn, p.rStep, al);
+            var g1 = GB.fitTemplate(polG, Ta, nth, nr, thStep, p.maxLop);
+            if (g1 && (!gf || g1.sigma < gf.sigma)) { gf = g1; Ts = Ta; }
+         }
+         if (an.entry) an.entry.grid = { T: new Float64Array(T), Ts: Ts,
+                                         gf: gf ? { a: gf.a, bc: gf.bc, bs: gf.bs, sigma: gf.sigma } : null };
       }
       if (!gf || gf.a <= 0) {
          if (opts.dryRun) { s.status = "noghost"; s.conf = 0; continue; }
@@ -882,6 +994,7 @@ GB.process = function (chans, W, H, params, selectFn, log, opts) {
          }
          peaks.push(pk);
       }
+      touched.push({ x0: x0, x1: x0 + w, y0: y0, y1: y0 + h });
       ++nDone;
       log("OK   " + tag + ": ghost removed (confidence " + conf.toFixed(1) + "; " + an.masked + " neighbour stars masked" + (capped ? ", capped" : "") +
           (nLim ? ", limited to the light available in " + nLim + " channel(s)" : "") + "), peak " +
@@ -1081,6 +1194,7 @@ function GB_Dialog(win, params, chans) {
    this.marks = [];        // { x, y, cls: 'white'|'orange'|'manual', on, status, conf }
    this.override = {};     // key -> true/false chosen by the user
    this.extra = [];        // user-added stars { x, y } (image coordinates, snapped)
+   this.cache = {};        // detection and star analyses, reused by Re-analyse and by the run
 
    this.effectiveParams = function () {
       if (self.params.manual) return self.params;
@@ -1274,7 +1388,7 @@ function GB_Dialog(win, params, chans) {
       console.writeln("<end><cbr>Analysing stars (nothing is modified yet)...");
       processEvents();
       var t0 = Date.now();
-      var res = GB.process(self.chans, W, H, self.effectiveParams(), null, function () {}, { dryRun: true, progress: GB_progress() });
+      var res = GB.process(self.chans, W, H, self.effectiveParams(), null, function () {}, { dryRun: true, progress: GB_progress(), cache: self.cache });
       var p = self.effectiveParams(), ps = GB.scaled(p), marks = [];
       for (var i = 0; i < res.stars.length; ++i) {
          var s = res.stars[i];
@@ -1563,7 +1677,7 @@ function GB_run() {
 
    var t0 = Date.now();
    var res = GB.process(chans, W, H, run, selectFn, function (msg) { console.writeln(msg); processEvents(); },
-                         { extra: extra, forceFn: forceFn, progress: GB_progress() });
+                         { extra: extra, forceFn: forceFn, progress: GB_progress(), cache: dlg.cache });
 
    var nc = chans.length, out = [];
    for (var c = 0; c < nc; ++c) {

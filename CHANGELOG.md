@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.6
+
+Performance, after a report of very long run times on a Mac M1 (7 min of analysis, then 6 min of
+correction, on a 4096 x 3072 M42 stack with 20 candidate stars):
+
+- Each star is analysed once instead of up to six times. The analysis was repeated by both
+  learning passes, by the classification pass, then all over again when Execute was clicked. The
+  analyses (and the star detection) are now kept and reused by the learning passes, by Re-analyse,
+  and by the run that follows the dialog. A star is analysed again only when a correction already
+  made has modified its surroundings, when a manual star changes its neighbours, or when a
+  setting changed.
+- The halo and background fit (the most expensive step) builds its normal matrix once per star
+  for the four fits that share it (luminance and three channels), on a design matrix stored row by
+  row, and stops iterating as soon as the rejected pixels no longer change.
+- Measured with the bench tool (Node.js, dialog analysis followed by the run, default selection):
+  M42 36 s -> 8 s, IC 1805 25 s -> 6 s, Eastern Veil 13 s -> 3 s, Veil 8 s -> 2.5 s. PixInsight
+  runs the same code more slowly, but the number of star analyses drops by the same factor.
+- Results are unchanged: ghost images identical bit for bit to 0.1.5 on the four bench stacks, with
+  the default selection and with every star selected and forced. 43 tests.
+
 ## 0.1.5
 
 - Safety limit on the subtraction: in each of 16 sectors x radial bands and in each channel, the
